@@ -681,16 +681,38 @@ namespace OpenRCT2::PathFinding
             return std::nullopt;
 
         uint32_t segmentTime = 0;
-        auto currentIndex = boardingIndex;
-        for (size_t stationsVisited = 0; stationsVisited < stations.size(); stationsVisited++)
+        if (ride.mode == RideMode::shuttle)
         {
-            segmentTime += stations[currentIndex].SegmentTime;
-            currentIndex = (currentIndex + 1) % stations.size();
-            if (currentIndex == alightingIndex)
-                break;
+            // A shuttle runs back and forth along a single line rather than a loop, so the
+            // leg wrapping from the highest station index back to the lowest does not exist.
+            // Sum the contiguous run of legs between the two stations instead of wrapping.
+            const auto lo = std::min(boardingIndex, alightingIndex);
+            const auto hi = std::max(boardingIndex, alightingIndex);
+            for (auto i = lo; i < hi; i++)
+                segmentTime += stations[i].SegmentTime;
+
+            // The guest cannot know which way the shuttle will be heading when they board;
+            // roughly half the time they sit through part of an extra there-and-back leg
+            // before reaching their stop. Fold that expected detour into the estimate so
+            // marginal shuttle routes are treated as the gamble they are.
+            uint32_t fullLineTime = 0;
+            for (size_t i = 0; i + 1 < stations.size(); i++)
+                fullLineTime += stations[i].SegmentTime;
+            segmentTime += fullLineTime / 2;
         }
-        if (currentIndex != alightingIndex)
-            return std::nullopt;
+        else
+        {
+            auto currentIndex = boardingIndex;
+            for (size_t stationsVisited = 0; stationsVisited < stations.size(); stationsVisited++)
+            {
+                segmentTime += stations[currentIndex].SegmentTime;
+                currentIndex = (currentIndex + 1) % stations.size();
+                if (currentIndex == alightingIndex)
+                    break;
+            }
+            if (currentIndex != alightingIndex)
+                return std::nullopt;
+        }
 
         const uint32_t queuePenalty = stations[boardingIndex].QueueTime / kTransportQueueTimeDivisor;
         const uint32_t ridePenalty = segmentTime / kTransportSegmentTimeDivisor;
@@ -2009,37 +2031,48 @@ namespace OpenRCT2::PathFinding
         if (!peep.transportRideNavigation.isActive())
             return std::nullopt;
 
-        if (IsTransportNavigationValid(peep))
+        /* Only abandon the planned transport trip when it has become genuinely
+         * unusable (ride closed, stations removed, now paid, etc). A transient
+         * failure to path to the boarding queue on a single tick must not clear
+         * the navigation, otherwise the guest's action flickers between
+         * "Heading for" and "Taking <ride>" and the pathfinder re-plans the same
+         * trip from scratch on the following tick. */
+        if (!IsTransportNavigationValid(peep))
         {
-            const auto ultimateGoal = peep.pathfindGoal;
-            const auto ultimateHistory = peep.pathfindHistory;
-
-            const auto* transportRide = GetRide(peep.transportRideNavigation.rideId);
-            const auto& boardingStation = transportRide->getStation(peep.transportRideNavigation.boardingStation);
-            TileCoordsXYZ boardingGoal = boardingStation.Entrance;
-            GetRideQueueEnd(boardingGoal);
-
-            const auto direction = ChooseDirection(
-                TileCoordsXYZ{ peep.nextLoc }, boardingGoal, peep, true, peep.transportRideNavigation.rideId);
-
-            if (preserveUltimateGoal)
+            peep.transportRideNavigation.clear();
+            if (!preserveUltimateGoal)
             {
-                peep.pathfindGoal = ultimateGoal;
-                peep.pathfindHistory = ultimateHistory;
+                peep.resetPathfindGoal();
             }
-
-            if (direction != kInvalidDirection)
-            {
-                LogPathfinding(&peep, "Completed CalculateNextDestination - heading for transport ride: %d.", direction);
-                return PeepMoveOneTile(direction, peep);
-            }
+            return std::nullopt;
         }
 
-        peep.transportRideNavigation.clear();
-        if (!preserveUltimateGoal)
+        const auto ultimateGoal = peep.pathfindGoal;
+        const auto ultimateHistory = peep.pathfindHistory;
+
+        const auto* transportRide = GetRide(peep.transportRideNavigation.rideId);
+        const auto& boardingStation = transportRide->getStation(peep.transportRideNavigation.boardingStation);
+        TileCoordsXYZ boardingGoal = boardingStation.Entrance;
+        GetRideQueueEnd(boardingGoal);
+
+        const auto direction = ChooseDirection(
+            TileCoordsXYZ{ peep.nextLoc }, boardingGoal, peep, true, peep.transportRideNavigation.rideId);
+
+        if (preserveUltimateGoal)
         {
-            peep.resetPathfindGoal();
+            peep.pathfindGoal = ultimateGoal;
+            peep.pathfindHistory = ultimateHistory;
         }
+
+        if (direction != kInvalidDirection)
+        {
+            LogPathfinding(&peep, "Completed CalculateNextDestination - heading for transport ride: %d.", direction);
+            return PeepMoveOneTile(direction, peep);
+        }
+
+        /* Navigation is still valid but we could not path to the boarding queue
+         * this tick; keep the plan and fall back to normal pathfinding towards
+         * the ultimate destination for now. */
         return std::nullopt;
     }
 
