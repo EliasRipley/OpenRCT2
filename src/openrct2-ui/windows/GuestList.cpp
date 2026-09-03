@@ -98,7 +98,14 @@ namespace OpenRCT2::Ui::Windows
 
         struct FilterArguments
         {
-            uint8_t args[12]{};
+            // Must be large enough to hold the widest set of format arguments produced by
+            // Peep::formatActionTo() / the filter cases below. The transport ride navigation
+            // action string ("Taking {STRINGID} to reach {STRINGID}") formats two ride names,
+            // and a custom-named ride contributes a StringId plus an 8-byte pointer, so the
+            // worst case is 2 + (2 + 8) + (2 + 8) = 22 bytes. Formatter does not
+            // bounds-check writes against a caller-supplied buffer, so an undersized array
+            // here silently overflows and corrupts the stack.
+            uint8_t args[32]{};
 
             StringId GetFirstStringId()
             {
